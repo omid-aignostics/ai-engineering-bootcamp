@@ -6,17 +6,17 @@ Run: uvicorn serve_stage4:app --port 8000 --reload
 import time
 from pathlib import Path
 
+from anthropic import Anthropic
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from openai import OpenAI
 from pydantic import BaseModel, Field, ValidationError
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 app = FastAPI()
-client = OpenAI()
+client = Anthropic()
 
-DEFAULT_MODEL = "gpt-4o"
+DEFAULT_MODEL = "claude-opus-5-5"
 
 
 class Answer(BaseModel):
@@ -39,21 +39,23 @@ class AskResponse(BaseModel):
 
 
 def call_structured(question: str, model: str) -> tuple[Answer, int]:
-    completion = client.chat.completions.parse(
+    message = client.messages.parse(
         model=model,
+        max_tokens=16000,
         messages=[{"role": "user", "content": question}],
-        response_format=Answer,
+        output_format=Answer,
     )
-    parsed = completion.choices[0].message.parsed
+    parsed = message.parsed_output
     if parsed is None:
         raise ValueError("Model returned no parseable structured output")
-    tokens_used = completion.usage.total_tokens if completion.usage else 0
+    tokens_used = message.usage.input_tokens + message.usage.output_tokens
     return parsed, tokens_used
 
 
 def call_unsafe(question: str, model: str) -> tuple[Answer, int]:
-    completion = client.chat.completions.create(
+    message = client.messages.create(
         model=model,
+        max_tokens=16000,
         messages=[
             {
                 "role": "user",
@@ -65,9 +67,9 @@ def call_unsafe(question: str, model: str) -> tuple[Answer, int]:
             }
         ],
     )
-    raw = completion.choices[0].message.content or ""
+    raw = next((block.text for block in message.content if block.type == "text"), "")
     answer = Answer.model_validate_json(raw)
-    tokens_used = completion.usage.total_tokens if completion.usage else 0
+    tokens_used = message.usage.input_tokens + message.usage.output_tokens
     return answer, tokens_used
 
 

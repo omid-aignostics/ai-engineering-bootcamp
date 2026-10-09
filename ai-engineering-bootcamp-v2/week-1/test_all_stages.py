@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke-test all five stage APIs against the real OpenAI endpoint."""
+"""Smoke-test all five stage APIs against the real Anthropic API."""
 
 import socket
 import subprocess
@@ -98,10 +98,10 @@ def test_stage3(base: str) -> bool:
 
 def test_stage4(base: str) -> bool:
     print("\n=== Stage 4: model + latency ===")
-    status, data = post(base, {"question": QUESTION, "model": "gpt-4o-mini"})
+    status, data = post(base, {"question": QUESTION, "model": "claude-haiku-5-5"})
     ok = True
     ok &= check("status", status == 200, f"HTTP {status}")
-    ok &= check("model", data.get("model") == "gpt-4o-mini", f"model={data.get('model')}")
+    ok &= check("model", data.get("model") == "claude-haiku-5-5", f"model={data.get('model')}")
     ok &= check("latency", isinstance(data.get("latency_ms"), int) and data["latency_ms"] > 0, f"latency_ms={data.get('latency_ms')}")
     ok &= check("no cost yet", "cost_usd" not in data, "cost_usd absent (stage 4 only)")
     ok &= check("keys", set(data.keys()) == {"answer", "tokens_used", "model", "latency_ms"}, f"keys={list(data.keys())}")
@@ -110,15 +110,15 @@ def test_stage4(base: str) -> bool:
 
 def test_stage5(base: str) -> bool:
     print("\n=== Stage 5: cost readout ===")
-    _, mini = post(base, {"question": QUESTION, "model": "gpt-4o-mini"})
-    status, full = post(base, {"question": QUESTION, "model": "gpt-4o"})
+    _, mini = post(base, {"question": QUESTION, "model": "claude-haiku-5-5"})
+    status, full = post(base, {"question": QUESTION, "model": "claude-opus-5-5"})
     ok = True
     ok &= check("status", status == 200, f"HTTP {status}")
     ok &= check("cost_usd", isinstance(full.get("cost_usd"), (int, float)) and full["cost_usd"] > 0, f"cost_usd={full.get('cost_usd')}")
     ok &= check("all fields", set(full.keys()) == {"answer", "tokens_used", "model", "latency_ms", "cost_usd"}, f"keys={list(full.keys())}")
     mini_cost = mini.get("cost_usd", 0)
     full_cost = full.get("cost_usd", 0)
-    ok &= check("cost delta", full_cost > mini_cost, f"gpt-4o ${full_cost:.6f} > mini ${mini_cost:.6f}")
+    ok &= check("cost delta", full_cost > mini_cost, f"opus ${full_cost:.6f} > haiku ${mini_cost:.6f}")
     return ok
 
 

@@ -5,15 +5,15 @@ Run: uvicorn serve_stage1:app --port 8000 --reload
 
 from pathlib import Path
 
+from anthropic import Anthropic
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from openai import OpenAI
 from pydantic import BaseModel
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 app = FastAPI()
-client = OpenAI()
+client = Anthropic()
 
 
 class AskRequest(BaseModel):
@@ -33,12 +33,14 @@ class AskResponse(BaseModel):
 def ask(body: AskRequest) -> AskResponse:
     """Answer one question and surface real token usage for cost visibility."""
 
-    completion = client.chat.completions.create(
-        model="gpt-4o-mini",
+    message = client.messages.create(
+        model="claude-opus-5-5",
+        max_tokens=16000,
         messages=[{"role": "user", "content": body.question}],
     )
 
-    answer = completion.choices[0].message.content or ""
-    tokens_used = completion.usage.total_tokens if completion.usage else 0
+    # The reply is a list of content blocks; the answer lives in the text block.
+    answer = next((block.text for block in message.content if block.type == "text"), "")
+    tokens_used = message.usage.input_tokens + message.usage.output_tokens
 
     return AskResponse(answer=answer, tokens_used=tokens_used)

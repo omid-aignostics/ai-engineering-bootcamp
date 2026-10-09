@@ -5,15 +5,15 @@ Run: uvicorn serve_stage3:app --port 8000 --reload
 
 from pathlib import Path
 
+from anthropic import Anthropic
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from openai import OpenAI
 from pydantic import BaseModel, Field, ValidationError
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 app = FastAPI()
-client = OpenAI()
+client = Anthropic()
 
 
 class Answer(BaseModel):
@@ -33,22 +33,24 @@ class AskResponse(BaseModel):
 
 
 def call_structured(question: str) -> tuple[Answer, int]:
-    completion = client.chat.completions.parse(
-        model="gpt-4o-mini",
+    message = client.messages.parse(
+        model="claude-opus-5-5",
+        max_tokens=16000,
         messages=[{"role": "user", "content": question}],
-        response_format=Answer,
+        output_format=Answer,
     )
-    parsed = completion.choices[0].message.parsed
+    parsed = message.parsed_output
     if parsed is None:
         raise ValueError("Model returned no parseable structured output")
-    tokens_used = completion.usage.total_tokens if completion.usage else 0
+    tokens_used = message.usage.input_tokens + message.usage.output_tokens
     return parsed, tokens_used
 
 
 def call_unsafe(question: str) -> tuple[Answer, int]:
     """Demo path: bad instruction makes confidence a string so validation fails."""
-    completion = client.chat.completions.create(
-        model="gpt-4o-mini",
+    message = client.messages.create(
+        model="claude-opus-5-5",
+        max_tokens=16000,
         messages=[
             {
                 "role": "user",
@@ -60,9 +62,9 @@ def call_unsafe(question: str) -> tuple[Answer, int]:
             }
         ],
     )
-    raw = completion.choices[0].message.content or ""
+    raw = next((block.text for block in message.content if block.type == "text"), "")
     answer = Answer.model_validate_json(raw)
-    tokens_used = completion.usage.total_tokens if completion.usage else 0
+    tokens_used = message.usage.input_tokens + message.usage.output_tokens
     return answer, tokens_used
 
 

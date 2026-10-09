@@ -3,9 +3,9 @@
 import time
 from pathlib import Path
 
+from anthropic import Anthropic
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from openai import OpenAI
 from pydantic import BaseModel, Field, ValidationError
 
 # Load .env from this folder so the key is found regardless of shell working directory.
@@ -14,16 +14,17 @@ load_dotenv(_ENV_PATH)
 
 # Reuse one client so TLS handshakes are not repeated on every request.
 app = FastAPI()
-client = OpenAI()  # Reads OPENAI_API_KEY from the environment; never hardcode keys.
+client = Anthropic()  # Reads ANTHROPIC_API_KEY from the environment; never hardcode keys.
 
 # Stage 4 default — strong general model; swap at request time for the live demo.
-DEFAULT_MODEL = "gpt-4o"
+DEFAULT_MODEL = "claude-opus-5-5"
+MAX_TOKENS = 16000
 
-# Stage 5 — per-1K-token input/output USD (derived from OpenAI list prices).
+# Stage 5 — per-1K-token input/output USD (derived from Anthropic list prices).
 MODEL_PRICES_PER_1K: dict[str, tuple[float, float]] = {
-    "gpt-4o": (0.0025, 0.01),
-    "gpt-4o-mini": (0.00015, 0.0006),
-    "o3-mini": (0.0011, 0.0044),
+    "claude-opus-5-5": (0.004, 0.02),
+    "claude-sonnet-5-5": (0.002, 0.01),
+    "claude-haiku-5-5": (0.0001, 0.0005),
 }
 
 
@@ -53,35 +54,34 @@ class AskResponse(BaseModel):
     cost_usd: float
 
 
-def compute_cost_usd(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+def compute_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
     """Turn real usage into dollars — same prompt, different model, different cost."""
 
     prices = MODEL_PRICES_PER_1K.get(model, MODEL_PRICES_PER_1K[DEFAULT_MODEL])
     input_per_1k, output_per_1k = prices
-    return (prompt_tokens / 1000 * input_per_1k) + (completion_tokens / 1000 * output_per_1k)
+    return (input_tokens / 1000 * input_per_1k) + (output_tokens / 1000 * output_per_1k)
 
 
 def call_model_structured(question: str, model: str) -> tuple[Answer, int, int, int]:
     """
-    Stage 2 center: OpenAI structured output forces exactly the Answer schema.
+    Stage 2 center: Anthropic structured output forces exactly the Answer schema.
     Returns parsed answer plus token counts from billing metadata.
     """
 
-    completion = client.chat.completions.parse(
+    message = client.messages.parse(
         model=model,
+        max_tokens=MAX_TOKENS,
         messages=[{"role": "user", "content": question}],
-        response_format=Answer,
+        output_format=Answer,
     )
 
-    parsed = completion.choices[0].message.parsed
+    parsed = message.parsed_output
     if parsed is None:
         raise ValueError("Model returned no parseable structured output")
 
-    usage = completion.usage
-    total = usage.total_tokens if usage else 0
-    prompt_tokens = usage.prompt_tokens if usage else 0
-    completion_tokens = usage.completion_tokens if usage else 0
-    return parsed, total, prompt_tokens, completion_tokens
+    input_tokens = message.usage.input_tokens
+    output_tokens = message.usage.output_tokens
+    return parsed, input_tokens + output_tokens, input_tokens, output_tokens
 
 
 def call_model_unsafe(question: str, model: str) -> tuple[Answer, int, int, int]:
@@ -90,8 +90,9 @@ def call_model_unsafe(question: str, model: str) -> tuple[Answer, int, int, int]
     The bad instruction makes confidence a string so Pydantic rejects it reliably.
     """
 
-    completion = client.chat.completions.create(
+    message = client.messages.create(
         model=model,
+        max_tokens=MAX_TOKENS,
         messages=[
             {
                 "role": "user",
@@ -104,15 +105,14 @@ def call_model_unsafe(question: str, model: str) -> tuple[Answer, int, int, int]
         ],
     )
 
-    raw = completion.choices[0].message.content or ""
+    # The reply is a list of content blocks; the answer lives in the text block.
+    raw = next((block.text for block in message.content if block.type == "text"), "")
     # Guardrail: refuse malformed output instead of passing it through to clients.
     answer = Answer.model_validate_json(raw)
 
-    usage = completion.usage
-    total = usage.total_tokens if usage else 0
-    prompt_tokens = usage.prompt_tokens if usage else 0
-    completion_tokens = usage.completion_tokens if usage else 0
-    return answer, total, prompt_tokens, completion_tokens
+    input_tokens = message.usage.input_tokens
+    output_tokens = message.usage.output_tokens
+    return answer, input_tokens + output_tokens, input_tokens, output_tokens
 
 
 @app.post("/ask")
@@ -130,16 +130,16 @@ def ask(body: AskRequest) -> AskResponse:
             # First attempt with force_bad uses the unsafe path; retry uses structured output.
             use_bad_path = body.force_bad and attempt == 0
             if use_bad_path:
-                answer, tokens_used, prompt_tokens, completion_tokens = call_model_unsafe(
+                answer, tokens_used, input_tokens, output_tokens = call_model_unsafe(
                     body.question, model
                 )
             else:
-                answer, tokens_used, prompt_tokens, completion_tokens = call_model_structured(
+                answer, tokens_used, input_tokens, output_tokens = call_model_structured(
                     body.question, model
                 )
 
             latency_ms = int((time.perf_counter() - start) * 1000)
-            cost_usd = compute_cost_usd(model, prompt_tokens, completion_tokens)
+            cost_usd = compute_cost_usd(model, input_tokens, output_tokens)
 
             return AskResponse(
                 answer=answer,

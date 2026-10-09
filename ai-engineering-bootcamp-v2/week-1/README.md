@@ -5,7 +5,7 @@ Build a typed LLM endpoint step by step. Each stage is a standalone FastAPI app 
 ## Setup
 
 ```bash
-cp .env.example .env          # OPENAI_API_KEY=sk-...
+cp .env.example .env          # ANTHROPIC_API_KEY=sk-ant-...
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -16,7 +16,7 @@ pip install -r requirements.txt
 | Stage | File | What you learn |
 |-------|------|----------------|
 | 1 | `serve_stage1.py` | Bare `/ask` — string answer + `tokens_used` |
-| 2 | `serve_stage2.py` | Structured output via Pydantic + `completions.parse` |
+| 2 | `serve_stage2.py` | Structured output via Pydantic + `messages.parse` |
 | 3 | `serve_stage3.py` | Validation guardrail + retry (`force_bad` demo knob) |
 | 4 | `serve_stage4.py` | Per-request `model` override + `latency_ms` |
 | 5 | `serve_stage5.py` / `main.py` | Full system + `cost_usd` readout |
@@ -52,12 +52,12 @@ Stage 5 example (model + cost):
 ```bash
 curl -s -X POST http://127.0.0.1:8000/ask \
   -H "Content-Type: application/json" \
-  -d '{"question": "What is chunking?", "model": "gpt-4o-mini"}'
+  -d '{"question": "What is chunking?", "model": "claude-haiku-5-5"}'
 ```
 
 ## Smoke-test all stages
 
-Requires `.venv` and a valid `OPENAI_API_KEY`:
+Requires `.venv` and a valid `ANTHROPIC_API_KEY`:
 
 ```bash
 python test_all_stages.py
