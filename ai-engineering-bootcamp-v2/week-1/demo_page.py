@@ -1,165 +1,92 @@
-"""Single test page for all five /ask demo stages.
+"""Week 1 /ask demo UI — a chat view plus the five-stage demo runner.
 
 Run this page:
   streamlit run demo_page.py
+
+Start with your hosted API already filled in:
+  DEMO_API_URL=https://your-service.onrender.com streamlit run demo_page.py
+
+Colors and fonts live in .streamlit/config.toml.
 """
 
-import json
-
-import httpx
 import streamlit as st
 
-WORKDIR_CMD = "ai-engineering-bootcamp-v2/week-1"  # path from repo root
+from ask_client import DEFAULT_URL, WORKDIR_CMD, detect_stage, is_local, normalize_url
 
-STAGES = [
-    {
-        "num": 1,
-        "title": "Bare /ask",
-        "serve": "uvicorn serve_stage1:app --port 8000 --reload",
-        "look_for": "Plain `answer` string and real `tokens_used`.",
-        "dummy_question": "What is Retrieval-Augmented Generation in one sentence?",
-        "fields": [],
-    },
-    {
-        "num": 2,
-        "title": "Structured output",
-        "serve": "uvicorn serve_stage2:app --port 8000 --reload",
-        "look_for": "`answer` is an object with `confidence` and `sources_needed`.",
-        "dummy_question": "Explain what an embedding is in one sentence.",
-        "fields": [],
-    },
-    {
-        "num": 3,
-        "title": "Guardrail + retry",
-        "serve": "uvicorn serve_stage3:app --port 8000 --reload",
-        "look_for": "Normal question works; `force_bad` triggers retry then succeeds.",
-        "dummy_question": "What is a vector database?",
-        "dummy_force_bad": True,
-        "fields": ["force_bad"],
-    },
-    {
-        "num": 4,
-        "title": "Model selectable",
-        "serve": "uvicorn serve_stage4:app --port 8000 --reload",
-        "look_for": "`model` and `latency_ms` in the response; swap models live.",
-        "dummy_question": "What is chunking in RAG?",
-        "dummy_model": "claude-haiku-5-5",
-        "fields": ["force_bad", "model"],
-    },
-    {
-        "num": 5,
-        "title": "Cost readout",
-        "serve": "uvicorn serve_stage5:app --port 8000 --reload",
-        "look_for": "`cost_usd` closes the loop — same prompt, different model, different cost.",
-        "dummy_question": "What is Retrieval-Augmented Generation in one sentence?",
-        "dummy_model": "claude-opus-5-5",
-        "fields": ["force_bad", "model"],
-    },
-]
+# Chat-app touches the theme can't express: serif replies, soft user bubbles, a centered greeting.
+STYLE = """
+<style>
+[data-testid="stChatMessage"] {
+    padding: 0.75rem 1rem;
+}
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
+    background-color: rgba(128, 112, 96, 0.10);
+    border-radius: 1rem;
+}
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) {
+    background-color: transparent;
+}
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"])
+    [data-testid="stMarkdownContainer"] p {
+    font-family: "Source Serif 4", Georgia, serif;
+    font-size: 1.06rem;
+    line-height: 1.7;
+}
+[data-testid="stChatInput"] > div {
+    border-radius: 1.25rem;
+}
+.greeting {
+    text-align: center;
+    font-weight: 500;
+    margin-top: 14vh;
+}
+.greeting-sub {
+    text-align: center;
+    opacity: 0.7;
+    margin-bottom: 2rem;
+}
+</style>
+"""
 
+st.set_page_config(page_title="Week 1 /ask Demo", page_icon="💬")
+st.markdown(STYLE, unsafe_allow_html=True)
 
-def build_payload(
-    question: str,
-    stage: dict,
-    force_bad: bool,
-    model: str | None,
-) -> dict:
-    payload: dict = {"question": question}
-    if "force_bad" in stage["fields"]:
-        payload["force_bad"] = force_bad
-    if "model" in stage["fields"] and model:
-        payload["model"] = model
-    return payload
-
-
-def call_ask(base_url: str, payload: dict) -> tuple[int, dict | str]:
-    try:
-        response = httpx.post(f"{base_url.rstrip('/')}/ask", json=payload, timeout=120.0)
-        try:
-            return response.status_code, response.json()
-        except json.JSONDecodeError:
-            return response.status_code, response.text
-    except httpx.ConnectError:
-        return 0, {"error": f"Cannot reach {base_url} — start the stage server first."}
-    except httpx.HTTPError as exc:
-        return 0, {"error": str(exc)}
-
-
-def render_curl(base_url: str, payload: dict) -> str:
-    body = json.dumps(payload)
-    return (
-        f'curl -s -X POST {base_url.rstrip("/")}/ask '
-        f'-H "Content-Type: application/json" -d \'{body}\''
-    )
-
-
-def render_terminal_block(stage: dict, base_url: str, payload: dict) -> str:
-    return f"""cd {WORKDIR_CMD}
-source .venv/bin/activate
-pip install -r requirements.txt
-{stage["serve"]}
-
-# In another terminal — test this stage:
-{render_curl(base_url, payload)}"""
-
-
-st.set_page_config(page_title="Week 1 /ask Demo", layout="wide")
-st.title("Week 1 — `/ask` Demo Runner")
-st.caption("One page, five sections. Copy the commands below, start the matching server, then hit **Run test**.")
-
-base_url = st.sidebar.text_input("API base URL", "http://127.0.0.1:8000")
-
-st.sidebar.markdown("### Run this page")
-st.sidebar.code(
-    f"cd {WORKDIR_CMD}\nsource .venv/bin/activate\nstreamlit run demo_page.py",
-    language="bash",
+pages = st.navigation(
+    [
+        st.Page("chat_page.py", title="Chat", icon=":material/chat_bubble:", default=True),
+        st.Page("stage_runner.py", title="Stage demos", icon=":material/science:"),
+    ]
 )
 
-tabs = st.tabs([f"Demo {s['num']}: {s['title']}" for s in STAGES])
-
-for tab, stage in zip(tabs, STAGES):
-    with tab:
-        st.subheader(f"Demo {stage['num']} — {stage['title']}")
-        st.markdown(f"**Look for:** {stage['look_for']}")
-
-        default_q = stage["dummy_question"]
-        stage_question = st.text_input(
-            "Question",
-            default_q,
-            key=f"q_{stage['num']}",
-            placeholder="Type a question to send to /ask…",
+with st.sidebar:
+    with st.expander("API connection", icon=":material/link:"):
+        base_url = normalize_url(
+            st.text_input(
+                "API base URL",
+                DEFAULT_URL,
+                key="api_url",
+                help="Your Render URL (https://…onrender.com), or http://127.0.0.1:8000 for a "
+                "server on this computer. No need to add /ask.",
+            )
         )
+        if st.button("Check again", use_container_width=True):
+            detect_stage.clear()
+            st.rerun()
+        st.caption(f"Start this page: `cd {WORKDIR_CMD} && streamlit run demo_page.py`")
 
-        force_bad = stage.get("dummy_force_bad", False)
-        model = stage.get("dummy_model")
-        if "force_bad" in stage["fields"]:
-            force_bad = st.checkbox(
-                "force_bad (break schema on attempt 1)",
-                value=stage.get("dummy_force_bad", False),
-                key=f"bad_{stage['num']}",
-            )
-        if "model" in stage["fields"]:
-            options = [None, "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
-            default_model = stage.get("dummy_model")
-            model = st.selectbox(
-                "model",
-                options,
-                index=options.index(default_model) if default_model in options else 0,
-                format_func=lambda m: m or "claude-opus-5-5 (default)",
-                key=f"model_{stage['num']}",
-            )
+    local = is_local(base_url)
+    with st.spinner("Checking your API…"):
+        running_stage = detect_stage(base_url)
+    where = "this computer" if local else "hosted"
+    if running_stage is None:
+        st.error(f"Can't reach the API ({where}). Open **API connection** to fix the address.")
+    elif running_stage == 0:
+        st.warning("Something answers here, but it isn't a week-1 stage server.")
+    else:
+        st.success(f"Connected · {where} · stage {running_stage}")
 
-        payload = build_payload(stage_question, stage, force_bad, model)
+st.session_state["base_url"] = base_url
+st.session_state["is_local"] = local
+st.session_state["running_stage"] = running_stage
 
-        st.markdown("**Copy & run (terminal 1 — server, terminal 2 — curl):**")
-        st.code(render_terminal_block(stage, base_url, payload), language="bash")
-
-        if st.button("Run test", key=f"run_{stage['num']}", type="primary"):
-            with st.spinner("Calling /ask..."):
-                status, data = call_ask(base_url, payload)
-            if status:
-                st.markdown(f"**HTTP {status}**")
-            st.json(data)
-
-st.sidebar.divider()
-st.sidebar.markdown("**Full reference:** `main.py` / `serve_stage5.py`")
+pages.run()

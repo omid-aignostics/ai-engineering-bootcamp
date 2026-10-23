@@ -37,7 +37,13 @@ Interactive UI for all five stages:
 streamlit run demo_page.py
 ```
 
-Open http://localhost:8501. Set **API base URL** to `http://127.0.0.1:8000` and start the matching stage server in another terminal.
+Open http://localhost:8501. Set **API base URL** to `http://127.0.0.1:8000` and start the matching stage server in another terminal, or paste your hosted URL (e.g. Render). The sidebar shows which stage the server at that address is running.
+
+To open the page with your hosted URL already filled in:
+
+```bash
+DEMO_API_URL=https://your-service.onrender.com streamlit run demo_page.py
+```
 
 ## Test with curl
 
@@ -54,6 +60,29 @@ curl -s -X POST http://127.0.0.1:8000/ask \
   -H "Content-Type: application/json" \
   -d '{"question": "What is chunking?", "model": "claude-haiku-5-5"}'
 ```
+
+## Session 2 — RAG with Pinecone
+
+`main.py` can answer from your own documents. Pinecone stores them and embeds them itself (`llama-text-embed-v2`), so the only extra key is `PINECONE_API_KEY` (see `.env.example`).
+
+```bash
+python vector_store.py create-index   # one time
+python vector_store.py                # health report — look for "ok": true
+```
+
+Store a document, then ask about it:
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"text": "The office dog is called Pixel and loves carrots.", "document_id": "handbook"}'
+
+curl -s -X POST http://127.0.0.1:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is the office dog called?"}'
+```
+
+`/ask` retrieves the top 5 chunks (`top_k`) and tells Claude to answer **only** from them, citing each `document_id` it used in `answer.citations`, and to reply "I don't have enough information to answer that." when they don't cover the question. `sources` lists every retrieved chunk with its `id` and score. A citation that names a document that wasn't retrieved fails validation and triggers the retry. Without `PINECONE_API_KEY` it answers as before, with `sources` and `citations` empty. `GET /health/pinecone` checks the connection without spending tokens.
 
 ## Smoke-test all stages
 

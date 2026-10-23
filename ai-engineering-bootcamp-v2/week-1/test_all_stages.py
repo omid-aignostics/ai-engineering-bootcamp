@@ -115,7 +115,8 @@ def test_stage5(base: str) -> bool:
     ok = True
     ok &= check("status", status == 200, f"HTTP {status}")
     ok &= check("cost_usd", isinstance(full.get("cost_usd"), (int, float)) and full["cost_usd"] > 0, f"cost_usd={full.get('cost_usd')}")
-    ok &= check("all fields", set(full.keys()) == {"answer", "tokens_used", "model", "latency_ms", "cost_usd"}, f"keys={list(full.keys())}")
+    ok &= check("all fields", set(full.keys()) == {"answer", "tokens_used", "model", "latency_ms", "cost_usd", "sources"}, f"keys={list(full.keys())}")
+    ok &= check("sources list", isinstance(full.get("sources"), list), f"sources={len(full.get('sources', []))} retrieved")
     mini_cost = mini.get("cost_usd", 0)
     full_cost = full.get("cost_usd", 0)
     ok &= check("cost delta", full_cost > mini_cost, f"opus ${full_cost:.6f} > haiku ${mini_cost:.6f}")

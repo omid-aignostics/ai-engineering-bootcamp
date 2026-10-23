@@ -1,0 +1,32 @@
+# Warm, chat-app look for demo_page.py. Streamlit follows the system light/dark setting.
+
+[theme]
+font = "sans-serif"
+headingFont = "Source Serif 4:https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&display=swap"
+headingFontWeights = 500
+baseRadius = "large"
+buttonRadius = "full"
+showWidgetBorder = true
+showSidebarBorder = true
+
+[theme.light]
+primaryColor = "#C96442"
+backgroundColor = "#FAF9F5"
+secondaryBackgroundColor = "#F0EEE6"
+textColor = "#3D3D3A"
+borderColor = "#E3E0D6"
+linkColor = "#C96442"
+
+[theme.light.sidebar]
+backgroundColor = "#F3F1EA"
+
+[theme.dark]
+primaryColor = "#D97757"
+backgroundColor = "#262624"
+secondaryBackgroundColor = "#30302E"
+textColor = "#ECEAE3"
+borderColor = "#3E3E3A"
+linkColor = "#D97757"
+
+[theme.dark.sidebar]
+backgroundColor = "#1F1E1D"
