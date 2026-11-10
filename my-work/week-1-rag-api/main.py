@@ -1,6 +1,39 @@
 """Week 1 live demo — five stages in one file, built up live in class.
 
 Session 2 adds RAG: POST /ingest stores documents in Pinecone, and /ask answers from them.
+
+Endpoints:
+    POST /ask              Answer a question from the stored documents, with citations and cost.
+    POST /ingest           Split a document into chunks and store them in Pinecone.
+    GET  /health/pinecone  Check the Pinecone connection without spending tokens.
+
+How a question flows through the app ([LLM] = output can vary between runs,
+[fixed] = plain code, same input always gives the same output):
+
+    You type a question
+    -> [fixed] chat_page.py          takes your question (Streamlit)
+    -> [fixed] call_ask()            sends it to /ask (ask_client.py)
+    -> [fixed] ask()                 runs the steps below in a fixed order
+       -> [fixed] retrieve_context() -> Pinecone
+            [fixed] embeds the question        an AI model, but no randomness: same text -> same vector
+            [fixed] finds the closest chunks   pure math (similarity scores)
+       -> [fixed] build_prompt()       fills the grounding template
+       -> [LLM]   call_model_structured() -> Claude writes the answer   <- the only stochastic step
+       -> [fixed] check_citations()    rule check on Claude's output
+       -> [fixed] compute_cost_usd()   arithmetic
+       -> [fixed] AskResponse          packs the result
+    -> [fixed] render_reply()        shows it to you (chat_page.py)
+
+This is a RAG pipeline, not an agent: the code fixes the path, and Claude is called at
+exactly one point. Because that is the only step that can vary, its output is checked
+(the Answer shape and check_citations) and retried once if it's broken.
+
+Sources vs citations:
+    sources           What Pinecone found: the closest chunks to the question, best match first.
+    answer.citations  What Claude used: the document_ids its answer is based on (empty if it refused).
+    Citations are always a subset of sources; check_citations() enforces that.
+
+Pinecone details live in vector_store.py; text splitting lives in chunking.py.
 """
 
 import re
@@ -17,7 +50,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from chunking import chunk_text
 from vector_store import namespace, pinecone_configured, pinecone_health, query_similar, upsert_texts
 
+# ---------------------------------------------------------------------------
+# 1. Setup — runs once, when the server starts.
+# ---------------------------------------------------------------------------
+
 # Load .env from this folder so the key is found regardless of shell working directory.
+# On Render the keys come from the service's Environment settings instead.
 _ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(_ENV_PATH)
 
@@ -25,9 +63,13 @@ load_dotenv(_ENV_PATH)
 app = FastAPI()
 client = Anthropic()  # Reads ANTHROPIC_API_KEY from the environment; never hardcode keys.
 
+# ---------------------------------------------------------------------------
+# 2. Settings
+# ---------------------------------------------------------------------------
+
 # Stage 4 default — strong general model; swap at request time for the live demo.
 DEFAULT_MODEL = "claude-opus-5-5"
-MAX_TOKENS = 16000
+MAX_TOKENS = 16000  # Upper limit on the length of Claude's reply.
 
 # Stage 5 — per-1K-token input/output USD (derived from Anthropic list prices).
 MODEL_PRICES_PER_1K: dict[str, tuple[float, float]] = {
@@ -36,7 +78,12 @@ MODEL_PRICES_PER_1K: dict[str, tuple[float, float]] = {
     "claude-haiku-5-5": (0.0001, 0.0005),
 }
 
+# ---------------------------------------------------------------------------
+# 3. Grounding prompt (Session 2)
+# ---------------------------------------------------------------------------
+
 # Session 2 — grounding: answer only from retrieved chunks, cite them, refuse when they fall short.
+# The two {placeholders} are filled per request by build_prompt().
 REFUSAL = "I don't have enough information to answer that."
 GROUNDING_PROMPT = f"""Answer using ONLY the context below.
 If the context does not contain the answer, say:
@@ -48,7 +95,19 @@ Context:
 
 Question: {{question}}"""
 
+# ---------------------------------------------------------------------------
+# 4. Data shapes — FastAPI and Pydantic reject anything that doesn't fit these.
+# ---------------------------------------------------------------------------
 
+
+# Claude must reply in exactly the Answer shape (see call_model_structured). Its docstring is
+# part of the JSON schema Claude receives, so field notes live in these comments instead:
+#   answer          The answer text, or REFUSAL when the context doesn't cover the question.
+#   confidence      How sure the model is, from 0 to 1.
+#   sources_needed  Session 1 field: whether the answer would benefit from sources.
+#   citations       Session 2: the document_ids Claude says it used, picked from the retrieved
+#                   chunks in the prompt (a subset of AskResponse.sources). Verified by
+#                   check_citations(); empty when the answer is a refusal.
 class Answer(BaseModel):
     """Structured model output — this is what turns a chatbot into a component."""
 
@@ -60,7 +119,10 @@ class Answer(BaseModel):
 
 
 class AskRequest(BaseModel):
-    """Typed request body so bad input is rejected before we spend tokens."""
+    """Typed request body so bad input is rejected before we spend tokens.
+
+    Only `question` is required; the rest are optional knobs for the demos.
+    """
 
     question: str
     force_bad: bool = False  # Stage 3 demo knob — first attempt breaks schema on purpose.
@@ -69,7 +131,13 @@ class AskRequest(BaseModel):
 
 
 class Source(BaseModel):
-    """Session 2 — one retrieved chunk the answer could draw on, so callers can cite it."""
+    """Session 2 — one retrieved chunk the answer could draw on, so callers can cite it.
+
+        id           The chunk's ID in Pinecone, e.g. "handbook-0000".
+        document_id  The document the chunk came from, e.g. "handbook".
+        score        Similarity to the question; higher means more relevant.
+        text         The chunk's text, exactly as it was given to Claude.
+    """
 
     id: str
     document_id: str
@@ -78,12 +146,21 @@ class Source(BaseModel):
 
 
 class AskResponse(BaseModel):
-    """Typed response so callers always get the same shape back."""
+    """Typed response so callers always get the same shape back.
+
+    tokens_used and cost_usd count Claude's tokens only (Pinecone's embedding is billed
+    separately).
+
+    sources vs citations:
+        sources           Every chunk Pinecone retrieved, best match first — useful or not.
+        answer.citations  Only the document_ids Claude actually used for this answer,
+                          always a subset of the document_ids in sources.
+    """
 
     answer: Answer
     tokens_used: int
     model: str
-    latency_ms: int
+    latency_ms: int  # Retrieval plus the successful Claude call.
     cost_usd: float
     sources: list[Source] = []  # Session 2 — empty when nothing is stored or Pinecone isn't set up.
 
@@ -100,14 +177,24 @@ class IngestRequest(BaseModel):
 
 
 class IngestResponse(BaseModel):
+    """Session 2 — what /ingest stored: how many chunks, the embedding tokens, and where."""
+
     document_id: str
     chunks_ingested: int
     embedding_tokens: int
     namespace: str
 
 
+# ---------------------------------------------------------------------------
+# 5. Helpers
+# ---------------------------------------------------------------------------
+
+
 def compute_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Turn real usage into dollars — same prompt, different model, different cost."""
+    """Turn real usage into dollars — same prompt, different model, different cost.
+
+    A model missing from MODEL_PRICES_PER_1K is priced like DEFAULT_MODEL.
+    """
 
     prices = MODEL_PRICES_PER_1K.get(model, MODEL_PRICES_PER_1K[DEFAULT_MODEL])
     input_per_1k, output_per_1k = prices
@@ -115,7 +202,14 @@ def compute_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float
 
 
 def retrieve_context(question: str, top_k: int) -> list[Source]:
-    """Session 2: the stored chunks most similar to the question (none if Pinecone isn't set up)."""
+    """Session 2: the stored chunks most similar to the question (none if Pinecone isn't set up).
+
+    Pinecone embeds the question with the same model used at ingest and returns the top_k
+    closest chunks, best match first.
+
+    Raises:
+        HTTPException 503: Pinecone is configured but the search failed.
+    """
 
     if not pinecone_configured():
         return []
@@ -135,7 +229,11 @@ def retrieve_context(question: str, top_k: int) -> list[Source]:
 
 
 def build_prompt(question: str, sources: list[Source]) -> str:
-    """Session 2: wrap the question in the grounding prompt; plain question when Pinecone isn't set up."""
+    """Session 2: wrap the question in the grounding prompt; plain question when Pinecone isn't set up.
+
+    Each chunk becomes a <document> block labelled with its chunk_id and document_id,
+    so Claude has something concrete to cite.
+    """
 
     if not sources:
         return question
@@ -148,17 +246,33 @@ def build_prompt(question: str, sources: list[Source]) -> str:
 
 
 def check_citations(answer: Answer, sources: list[Source]) -> None:
-    """Session 2 guardrail: a citation must name a document we actually retrieved."""
+    """Session 2 guardrail: a citation must name a document we actually retrieved.
+
+    Raises:
+        ValueError: the answer cites an unknown document. /ask treats this like any
+            other invalid answer and retries once.
+    """
 
     unknown = set(answer.citations) - {source.document_id for source in sources}
     if unknown:
         raise ValueError(f"Answer cited documents that were not retrieved: {sorted(unknown)}")
 
 
+# ---------------------------------------------------------------------------
+# 6. Calling Claude
+# ---------------------------------------------------------------------------
+
+
 def call_model_structured(question: str, model: str) -> tuple[Answer, int, int, int]:
     """
     Stage 2 center: Anthropic structured output forces exactly the Answer schema.
     Returns parsed answer plus token counts from billing metadata.
+
+    `question` is the full prompt: the grounding prompt when there is context, otherwise
+    the bare question. Returns (answer, total_tokens, input_tokens, output_tokens).
+
+    Raises:
+        ValueError: Claude returned nothing that fits the Answer shape.
     """
 
     message = client.messages.parse(
@@ -181,6 +295,12 @@ def call_model_unsafe(question: str, model: str) -> tuple[Answer, int, int, int]
     """
     Stage 3 demo path: free-form JSON call, then validate locally.
     The bad instruction makes confidence a string so Pydantic rejects it reliably.
+
+    Used only on the first attempt when force_bad is set, so the retry in /ask has
+    something to recover from. Same return value as call_model_structured.
+
+    Raises:
+        ValidationError: the reply doesn't fit the Answer shape (the expected outcome).
     """
 
     message = client.messages.create(
@@ -208,9 +328,24 @@ def call_model_unsafe(question: str, model: str) -> tuple[Answer, int, int, int]
     return answer, input_tokens + output_tokens, input_tokens, output_tokens
 
 
+# ---------------------------------------------------------------------------
+# 7. Endpoints
+# ---------------------------------------------------------------------------
+
+
 @app.post("/ask")
 def ask(body: AskRequest) -> AskResponse:
-    """Answer one question with structured output, guardrails, and cost visibility."""
+    """Answer one question with structured output, guardrails, and cost visibility.
+
+    Steps:
+        1. Pick the model: the request's, or DEFAULT_MODEL.
+        2. Retrieve the top_k closest chunks and build the grounding prompt (once).
+        3. Pinecone is set up but empty: return REFUSAL without calling Claude.
+        4. Call Claude (the unsafe path first if force_bad), check the citations,
+           work out latency and cost, and return.
+        5. Invalid answer (wrong shape or made-up citation): retry once.
+        6. Both attempts invalid: 502, never a half-parsed answer.
+    """
 
     model = body.model or DEFAULT_MODEL
     last_error: str | None = None
@@ -272,7 +407,14 @@ def ask(body: AskRequest) -> AskResponse:
 
 @app.post("/ingest")
 def ingest(body: IngestRequest) -> IngestResponse:
-    """Session 2: split a document into chunks and store them in Pinecone, which embeds them."""
+    """Session 2: split a document into chunks and store them in Pinecone, which embeds them.
+
+    Steps:
+        1. No Pinecone key: 503.
+        2. Split the text into ~1,000-character chunks (see chunking.py); empty text: 422.
+        3. Give each chunk a stable ID, e.g. "handbook-0000", so re-ingesting replaces it.
+        4. Store the chunks; Pinecone creates the embeddings. Pinecone error: 503.
+    """
 
     if not pinecone_configured():
         raise HTTPException(status_code=503, detail="PINECONE_API_KEY is not set, so there is nowhere to store documents.")
@@ -299,7 +441,11 @@ def ingest(body: IngestRequest) -> IngestResponse:
 
 @app.get("/health/pinecone")
 def pinecone_health_check(response: Response) -> dict:
-    """Debug check: is Pinecone reachable and the index usable? Spends no tokens."""
+    """Debug check: is Pinecone reachable and the index usable? Spends no tokens.
+
+    Returns 200 when everything is fine, 503 with an "error" field when not.
+    See vector_store.pinecone_health() for what is checked.
+    """
 
     report = pinecone_health()
     if not report["ok"]:
