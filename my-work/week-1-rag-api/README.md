@@ -84,6 +84,38 @@ curl -s -X POST http://127.0.0.1:8000/ask \
 
 `/ask` retrieves the top 5 chunks (`top_k`) and tells Claude to answer **only** from them, citing each `document_id` it used in `answer.citations`, and to reply "I don't have enough information to answer that." when they don't cover the question. `sources` lists every retrieved chunk with its `id` and score. A citation that names a document that wasn't retrieved fails validation and triggers the retry. Without `PINECONE_API_KEY` it answers as before, with `sources` and `citations` empty. `GET /health/pinecone` checks the connection without spending tokens.
 
+## Session 3 — Help desk agent (Google ADK)
+
+`POST /agent` hands a message to a Google ADK agent running on Claude (`helpdesk/agent.py`). The agent decides what to do: answer from the documents with citations, open an HR ticket when the documents have no answer, or send sensitive topics straight to HR. It returns its final answer plus a short `steps[]` list: for each tool call, the agent's reason (`think`), the `tool`, its `args`, and the tool's result (`observation`, cut to 300 characters).
+
+- `search_handbook` is the real tool: it calls `ask()` directly, so the agent uses the same RAG pipeline as `/ask`.
+- `create_hr_ticket` is a placeholder that returns a made-up ticket.
+- The agent stops after 6 model calls (`MAX_STEPS`), so it can't loop forever.
+- No new keys: it uses `ANTHROPIC_API_KEY` and `PINECONE_API_KEY`. Responses never include keys or environment values.
+
+Local (start `uvicorn main:app --port 8000` first):
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/agent \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Can I bring my dog to the office?"}'
+```
+
+Render (replace `your-service` with your service name; keep the real URL private):
+
+```bash
+curl -s -X POST https://your-service.onrender.com/agent \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Can I bring my dog to the office?"}'
+```
+
+Without the server:
+
+```bash
+python run_helpdesk.py                     # three test questions, printed as THINK / ACT / OBSERVE / DONE
+adk web --port 8080                        # ADK's browser UI; pick "helpdesk"
+```
+
 ## Smoke-test all stages
 
 Requires `.venv` and a valid `ANTHROPIC_API_KEY`:
@@ -96,7 +128,9 @@ python test_all_stages.py
 
 ```
 week-1/
-├── main.py              # Full system (stages 1–5 combined)
+├── main.py              # Full system (stages 1–5 combined) + /ingest, /agent
+├── helpdesk/            # Session 3 agent: agent.py (agent + tools), runner.py (steps[])
+├── run_helpdesk.py      # Run the agent in the terminal
 ├── serve_stage1.py … serve_stage5.py
 ├── demo_page.py         # Streamlit test UI
 ├── test_all_stages.py   # Automated stage smoke tests

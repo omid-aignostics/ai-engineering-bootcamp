@@ -4,3 +4,4 @@ anthropic
 pinecone
 python-dotenv
 streamlit
+google-adk

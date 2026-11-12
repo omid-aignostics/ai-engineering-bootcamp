@@ -10,3 +10,6 @@ __pycache__/
 venv/
 .venv/
 env/
+
+# ADK web UI session store (local test chats)
+.adk/

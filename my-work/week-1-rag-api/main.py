@@ -1,11 +1,13 @@
 """Week 1 live demo — five stages in one file, built up live in class.
 
 Session 2 adds RAG: POST /ingest stores documents in Pinecone, and /ask answers from them.
+Session 3 adds an agent: POST /agent lets a Google ADK agent decide what to do with a message.
 
 Endpoints:
     POST /ask              Answer a question from the stored documents, with citations and cost.
     POST /ingest           Split a document into chunks and store them in Pinecone.
     GET  /health/pinecone  Check the Pinecone connection without spending tokens.
+    POST /agent            Session 3: the help desk agent; returns its answer plus steps[].
 
 How a question flows through the app ([LLM] = output can vary between runs,
 [fixed] = plain code, same input always gives the same output):
@@ -33,6 +35,24 @@ Sources vs citations:
     answer.citations  What Claude used: the document_ids its answer is based on (empty if it refused).
     Citations are always a subset of sources; check_citations() enforces that.
 
+What this pipeline can't do, and why Session 3 adds an agent:
+    /ask gives exactly two kinds of response: an answer from the documents with citations,
+    or the refusal. That is deliberate, because it stops the app from making things up. But a
+    refusal is a dead end, and not every request is a document question.
+    The Session 3 agent (helpdesk/, POST /agent) sits in front of ask() and decides what kind
+    of help a message needs; ask() becomes one of its tools (search_handbook calls it directly,
+    not over HTTP). It handles what /ask can't:
+        no content in the documents   "Can I bring my dog to work?"  -> HR ticket instead of a dead end
+        shouldn't be answered at all   "I want to report my manager"  -> straight to a human (ticket)
+    The agent doesn't loosen the grounding rule: ask() still answers only from the documents.
+
+    POST /agent flow:
+        -> [fixed] agent()            -> run_agent() (helpdesk/runner.py)
+        -> [LLM]   agent decides      search the handbook, open a ticket, or both
+        -> [fixed] search_handbook()  -> ask() above, the whole RAG pipeline
+        -> [LLM]   agent writes the final answer from what the tools returned
+        -> [fixed] AgentResponse      answer + steps[] (think, tool, args, observation)
+
 Pinecone details live in vector_store.py; text splitting lives in chunking.py.
 """
 
@@ -48,6 +68,7 @@ from pinecone import PineconeError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from chunking import chunk_text
+from helpdesk.runner import run_agent
 from vector_store import namespace, pinecone_configured, pinecone_health, query_similar, upsert_texts
 
 # ---------------------------------------------------------------------------
@@ -183,6 +204,42 @@ class IngestResponse(BaseModel):
     chunks_ingested: int
     embedding_tokens: int
     namespace: str
+
+
+class AgentRequest(BaseModel):
+    """Session 3 — a message for the help desk agent (a question or a request)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(min_length=1, max_length=2000)
+
+
+class AgentStep(BaseModel):
+    """Session 3 — one tool call the agent made: Think -> Act -> Observe.
+
+        think        Why the agent chose this tool, in its own words (can be empty).
+        tool         The tool it called, e.g. "search_handbook".
+        args         The arguments it passed.
+        observation  What the tool returned, cut to 300 characters.
+    """
+
+    think: str | None = None
+    tool: str
+    args: dict
+    observation: str | None = None
+
+
+class AgentResponse(BaseModel):
+    """Session 3 — the agent's final answer and the steps it took to get there.
+
+    Only these fields are returned: never API keys, environment values or raw errors.
+    """
+
+    answer: str
+    steps: list[AgentStep]
+    model: str  # The model the agent thinks with (search_handbook's /ask uses DEFAULT_MODEL).
+    latency_ms: int
+    step_limit_reached: bool  # True if the run was stopped at MAX_STEPS model calls.
 
 
 # ---------------------------------------------------------------------------
@@ -451,3 +508,35 @@ def pinecone_health_check(response: Response) -> dict:
     if not report["ok"]:
         response.status_code = 503
     return report
+
+
+@app.post("/agent")
+async def agent(body: AgentRequest) -> AgentResponse:
+    """Session 3 — let the help desk agent handle a message (see helpdesk/agent.py).
+
+    The agent may answer from the documents (its search_handbook tool calls ask() above),
+    open an HR ticket, or both in sequence. Each request is handled on its own, like /ask.
+
+    Steps:
+        1. run_agent() runs the agent loop, at most MAX_STEPS model calls.
+        2. Return the final answer and one AgentStep per tool call.
+        3. Any unexpected failure: 502 with only the error type, never its details.
+    """
+
+    start = time.perf_counter()
+    try:
+        result = await run_agent(body.message)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"The agent failed ({type(exc).__name__}).") from exc
+
+    answer = result["answer"]
+    if result["step_limit_reached"] and not answer:
+        answer = "Stopped: the step limit was reached before a final answer."
+
+    return AgentResponse(
+        answer=answer,
+        steps=result["steps"],
+        model=result["model"],
+        latency_ms=int((time.perf_counter() - start) * 1000),
+        step_limit_reached=result["step_limit_reached"],
+    )
