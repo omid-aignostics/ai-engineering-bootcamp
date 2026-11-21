@@ -7,9 +7,13 @@ import sys
 import time
 from pathlib import Path
 
+import os
+
 import httpx
+from dotenv import load_dotenv
 
 WORKDIR = Path(__file__).resolve().parent
+load_dotenv(WORKDIR / ".env")  # stage 5 (main.py) needs X-API-Key = API_ACCESS_KEY
 QUESTION = "What is Retrieval-Augmented Generation in one sentence?"
 
 
@@ -48,7 +52,8 @@ def wait_up(base: str, timeout: float = 15.0) -> bool:
 
 
 def post(base: str, payload: dict) -> tuple[int, dict]:
-    r = httpx.post(f"{base}/ask", json=payload, timeout=120.0)
+    headers = {"X-API-Key": os.environ.get("API_ACCESS_KEY", "")}  # ignored by stages 1-4
+    r = httpx.post(f"{base}/ask", json=payload, headers=headers, timeout=120.0)
     return r.status_code, r.json()
 
 

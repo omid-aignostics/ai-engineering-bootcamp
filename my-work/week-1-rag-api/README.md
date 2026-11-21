@@ -50,6 +50,7 @@ DEMO_API_URL=https://your-service.onrender.com streamlit run demo_page.py
 ```bash
 curl -s -X POST http://127.0.0.1:8000/ask \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: <your API_ACCESS_KEY from .env>" \
   -d '{"question": "What is RAG in one sentence?"}'
 ```
 
@@ -58,6 +59,7 @@ Stage 5 example (model + cost):
 ```bash
 curl -s -X POST http://127.0.0.1:8000/ask \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: <your API_ACCESS_KEY from .env>" \
   -d '{"question": "What is chunking?", "model": "claude-haiku-5-5"}'
 ```
 
@@ -80,12 +82,17 @@ curl -s -X POST http://127.0.0.1:8000/ingest \
 
 curl -s -X POST http://127.0.0.1:8000/ask \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: <your API_ACCESS_KEY from .env>" \
   -d '{"question": "What is the office dog called?"}'
 ```
 
 `/ask` retrieves the top 5 chunks (`top_k`) and tells Claude to answer **only** from them, citing each `document_id` it used in `answer.citations`, and to reply "I don't have enough information to answer that." when they don't cover the question. `sources` lists every retrieved chunk with its `id` and score. A citation that names a document that wasn't retrieved fails validation and triggers the retry. Without `PINECONE_API_KEY` it answers as before, with `sources` and `citations` empty. `GET /health/pinecone` checks the connection without spending tokens.
 
 `/ingest` is for admins only: send the `X-Admin-Key` header with the value of `INGEST_API_KEY` (in `.env`, and in Render's Environment settings). A missing or wrong key gets 401; if `INGEST_API_KEY` isn't set, `/ingest` is switched off (503). Whoever can store documents controls what `/ask` and the agent say, so this is the main defense against prompt injection and fake documents (see `injection_demo.py`).
+
+## Access keys
+
+`/ask`, `/agent` and `/agent/confirm` need the header `X-API-Key` with the value of `API_ACCESS_KEY`; `/ingest` needs `X-Admin-Key` with `INGEST_API_KEY` (see `.env.example`). Put both in `.env` locally and in Render's Environment settings. A missing or wrong key gets 401; an unset variable switches the endpoint off (503). In Swagger (`/docs`), click **Authorize** and enter the keys once. The Streamlit app reads `API_ACCESS_KEY` from `.env` and sends it for you. `/docs`, `/openapi.json` and `/health/pinecone` stay open (they spend no tokens).
 
 ## Session 3 — Help desk agent (Google ADK)
 
@@ -101,6 +108,7 @@ Local (start `uvicorn main:app --port 8000` first):
 ```bash
 curl -s -X POST http://127.0.0.1:8000/agent \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: <your API_ACCESS_KEY from .env>" \
   -d '{"message": "Can I bring my dog to the office?"}'
 ```
 
@@ -109,6 +117,7 @@ Render (replace `your-service` with your service name; keep the real URL private
 ```bash
 curl -s -X POST https://your-service.onrender.com/agent \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: <your API_ACCESS_KEY from .env>" \
   -d '{"message": "Can I bring my dog to the office?"}'
 ```
 
@@ -117,6 +126,7 @@ Human-in-the-loop: before `create_hr_ticket` the agent pauses. `/agent` then ret
 ```bash
 curl -s -X POST http://127.0.0.1:8000/agent/confirm \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: <your API_ACCESS_KEY from .env>" \
   -d '{"session_id": "<from pending_confirmation>", "confirmation_id": "<from pending_confirmation>", "approved": true}'
 ```
 

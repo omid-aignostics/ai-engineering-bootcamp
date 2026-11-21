@@ -5,6 +5,7 @@ Session 3 adds an agent: POST /agent lets a Google ADK agent decide what to do w
 
 Endpoints:
     POST /ask              Answer a question from the stored documents, with citations and cost.
+                           (/ask, /agent, /agent/confirm need X-API-Key = API_ACCESS_KEY)
     POST /ingest           Split a document into chunks and store them in Pinecone (admins only:
                            X-Admin-Key header = INGEST_API_KEY).
     GET  /health/pinecone  Check the Pinecone connection without spending tokens.
@@ -91,11 +92,14 @@ How the agent is kept safe (Session 3), layer by layer:
                                          the error type, keys only in .env/Render  HTTPException details
     Bad input                            typed requests, extra fields rejected,    AskRequest, AgentRequest,
                                          known model names only (422)              IngestRequest
+    Strangers spend your Claude credits  /ask, /agent, /agent/confirm need         require_api_key()
+                                         X-API-Key = API_ACCESS_KEY, else 401
 
     Tested by injection_demo.py (prompt injection + data poisoning, in a test namespace).
-    Still open: /ask and /agent are public, so anyone with the URL can spend API credits
-    (keep the Render URL private); and someone holding the admin key can still store
-    false documents (no review step).
+    Still open: anyone holding a key can still overuse it (no per-user rate limit), so keep
+    keys private and set a spend limit in the Anthropic Console; someone holding the admin
+    key can still store false documents (no review step). /docs, /openapi.json and
+    /health/pinecone stay public: they spend no tokens.
 
 Pinecone details live in vector_store.py; text splitting lives in chunking.py.
 """
@@ -109,7 +113,8 @@ from pathlib import Path
 
 from anthropic import Anthropic, APIError
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException, Response
+from fastapi import Depends, FastAPI, HTTPException, Response, Security
+from fastapi.security import APIKeyHeader
 from pinecone import PineconeError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -389,19 +394,41 @@ def build_prompt(question: str, sources: list[Source]) -> str:
     return GROUNDING_PROMPT.format(retrieved_chunks=retrieved_chunks, question=question)
 
 
-def require_admin_key(given: str | None) -> None:
-    """Session 3 stretch: let only admins write documents (used by /ingest).
+# Session 3 stretch — access keys. Two separate secrets, so chat users can't add documents:
+#   X-API-Key   = API_ACCESS_KEY  for /ask, /agent, /agent/confirm (anyone allowed to use the app)
+#   X-Admin-Key = INGEST_API_KEY  for /ingest (admins only)
+# Declared as APIKeyHeader so Swagger (/docs) shows an "Authorize" button for entering them.
+api_key_header = APIKeyHeader(
+    name="X-API-Key", scheme_name="AccessKey", auto_error=False, description="Must equal API_ACCESS_KEY."
+)
+admin_key_header = APIKeyHeader(
+    name="X-Admin-Key", scheme_name="AdminKey", auto_error=False, description="Must equal INGEST_API_KEY."
+)
 
-    The secret comes from INGEST_API_KEY (.env locally, Environment settings on Render) and is
-    never returned or logged. compare_digest compares in constant time, so the response time
-    doesn't hint at how much of a guess was right.
+
+def check_key(given: str | None, env_name: str, header_name: str) -> None:
+    """Allow the request only if the header matches the secret in the environment variable.
+
+    The secret lives in .env locally and in Render's Environment settings; it is never returned
+    or logged. Fail closed: if the variable isn't set, nobody gets in (503). compare_digest
+    compares in constant time, so response times don't hint at how much of a guess was right.
     """
 
-    expected = os.environ.get("INGEST_API_KEY")
-    if not expected:  # fail closed: no key configured means nobody may write
-        raise HTTPException(status_code=503, detail="Ingest is disabled: INGEST_API_KEY is not set on the server.")
+    expected = os.environ.get(env_name)
+    if not expected:
+        raise HTTPException(status_code=503, detail=f"This endpoint is disabled: {env_name} is not set on the server.")
     if not given or not secrets.compare_digest(given.encode(), expected.encode()):
-        raise HTTPException(status_code=401, detail="Missing or wrong X-Admin-Key header.")
+        raise HTTPException(status_code=401, detail=f"Missing or wrong {header_name} header.")
+
+
+def require_api_key(key: str | None = Security(api_key_header)) -> None:
+    """Gate for /ask, /agent, /agent/confirm: stops strangers spending your Claude credits."""
+    check_key(key, "API_ACCESS_KEY", "X-API-Key")
+
+
+def require_admin_key(key: str | None = Security(admin_key_header)) -> None:
+    """Gate for /ingest: whoever can write documents controls what /ask and the agent say."""
+    check_key(key, "INGEST_API_KEY", "X-Admin-Key")
 
 
 def check_citations(answer: Answer, sources: list[Source]) -> None:
@@ -492,7 +519,7 @@ def call_model_unsafe(question: str, model: str) -> tuple[Answer, int, int, int]
 # ---------------------------------------------------------------------------
 
 
-@app.post("/ask")
+@app.post("/ask", dependencies=[Depends(require_api_key)])
 def ask(body: AskRequest) -> AskResponse:
     """Answer one question with structured output, guardrails, and cost visibility.
 
@@ -576,16 +603,13 @@ def ask(body: AskRequest) -> AskResponse:
     )
 
 
-@app.post("/ingest")
-def ingest(
-    body: IngestRequest,
-    x_admin_key: str | None = Header(default=None, description="Must equal INGEST_API_KEY."),
-) -> IngestResponse:
+@app.post("/ingest", dependencies=[Depends(require_admin_key)])
+def ingest(body: IngestRequest) -> IngestResponse:
     """Session 2: split a document into chunks and store them in Pinecone, which embeds them.
 
     Steps:
-        0. Session 3 stretch — admins only: the X-Admin-Key header must match INGEST_API_KEY
-           (wrong or missing: 401; INGEST_API_KEY not set on the server: 503, ingest is off).
+        0. Session 3 stretch — admins only (require_admin_key, run by FastAPI before this
+           function): X-Admin-Key must match INGEST_API_KEY, else 401 (503 if not set).
            Whoever can write documents controls what /ask and the agent say, so this stops
            prompt injection and data poisoning at the door.
         1. No Pinecone key: 503.
@@ -594,7 +618,6 @@ def ingest(
         4. Store the chunks; Pinecone creates the embeddings. Pinecone error: 503.
     """
 
-    require_admin_key(x_admin_key)
     if not pinecone_configured():
         raise HTTPException(status_code=503, detail="PINECONE_API_KEY is not set, so there is nowhere to store documents.")
     chunks = chunk_text(body.text)
@@ -632,7 +655,7 @@ def pinecone_health_check(response: Response) -> dict:
     return report
 
 
-@app.post("/agent")
+@app.post("/agent", dependencies=[Depends(require_api_key)])
 async def agent(body: AgentRequest) -> AgentResponse:
     """Session 3 — let the help desk agent handle a message (see helpdesk/agent.py).
 
@@ -655,7 +678,7 @@ async def agent(body: AgentRequest) -> AgentResponse:
     return _agent_response(result, start)
 
 
-@app.post("/agent/confirm")
+@app.post("/agent/confirm", dependencies=[Depends(require_api_key)])
 async def agent_confirm(body: AgentConfirmRequest) -> AgentResponse:
     """Session 3 stretch — approve or reject the tool call a paused /agent run is waiting on.
 

@@ -7,6 +7,11 @@ from urllib.parse import urlparse
 
 import httpx
 import streamlit as st
+from dotenv import load_dotenv
+
+# API_ACCESS_KEY (sent as X-API-Key) comes from .env in this folder. It must be the same value
+# as on the server you talk to — locally that's this .env, on Render its Environment settings.
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 # Show the real folder path, with the home folder shortened to ~.
 WORKDIR_CMD = str(Path(__file__).resolve().parent).replace(str(Path.home()), "~", 1)
@@ -63,7 +68,8 @@ def call_ask(base_url: str, payload: dict) -> tuple[int, dict | str]:
     """POST to /ask. Status 0 means no HTTP reply; the data is then a friendly message."""
 
     try:
-        response = httpx.post(f"{base_url}/ask", json=payload, timeout=120.0)
+        headers = {"X-API-Key": os.environ.get("API_ACCESS_KEY", "")}
+        response = httpx.post(f"{base_url}/ask", json=payload, headers=headers, timeout=120.0)
     except httpx.ConnectError:
         if is_local(base_url):
             return 0, (
@@ -98,6 +104,13 @@ def explain_error(status: int, data: dict | str) -> str:
             "This server is running OpenAI code, so it is not the week-1 app — probably a "
             "different project is using this port. Stop it and start the week-1 server."
         )
+    if status == 401:
+        return (
+            "The server needs an access key. Set API_ACCESS_KEY in .env (the same value as in "
+            "the server's settings, e.g. Render's Environment tab), then restart Streamlit."
+        )
+    if status == 503 and "API_ACCESS_KEY" in text:
+        return "The server has no API_ACCESS_KEY set, so /ask is switched off. Add it on the server."
     if status == 404:
         return "This server has no /ask endpoint. Check the API base URL in the sidebar."
     if status == 422:
