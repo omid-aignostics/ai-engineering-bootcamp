@@ -35,6 +35,13 @@ Safety limits:
     MAX_STEPS        ADK stops the run after this many model calls, so it can't loop forever.
     Uncited answers  search_handbook passes on only the refusal if /ask gave no citations.
 
+Why the THINK line is a short status message ("Let me check the handbook."):
+    An earlier rule asked Claude to "write what you will do and why (logged as THINK)".
+    Anthropic's API read that as an attempt to extract Claude's private reasoning and blocked
+    many replies (stop reason "refusal", category "reasoning_extraction"), so /agent returned
+    empty answers. A status message meant for the employee isn't blocked and still shows in
+    steps[] as "think".
+
 Claude, not Gemini:
     ADK's built-in AnthropicLlm connector calls the Anthropic API directly with
     ANTHROPIC_API_KEY. (We first used LiteLLM for this; dropping it saved about 190 MB of memory.)
@@ -170,8 +177,8 @@ Constraints:
 - Answer each new question on its own, using ONLY the search_handbook result for that
   question. Do not reuse, compare or correct answers from earlier in the conversation.
 - Call each tool at most once per question.
-- Before each tool call, write one short sentence saying what you will do and why
-  (this is logged as THINK).
+- Before each tool call, tell the employee in one short sentence what you are about to do,
+  e.g. "Let me check the handbook."
 
 Done means: you have sent ONE final reply that either
   (a) answers from the handbook and names the citations, or

@@ -9,6 +9,19 @@ Endpoints:
     GET  /health/pinecone  Check the Pinecone connection without spending tokens.
     POST /agent            Session 3: the help desk agent; returns its answer plus steps[].
 
+What runs what (from my-work/week-1-rag-api, after `source .venv/bin/activate`):
+    uvicorn main:app --port 8000   API server (this file): /ask, /ingest, /agent, /docs
+                                   -> http://127.0.0.1:8000/docs  (Swagger: try every endpoint)
+    streamlit run demo_page.py     Chat UI; talks to the API server above, or to Render
+                                   -> http://localhost:8501
+    adk web --port 8080            ADK's test UI for the agent alone (no API server needed)
+                                   -> http://127.0.0.1:8080, pick "helpdesk"
+    python run_helpdesk.py         Agent in the terminal: THINK / ACT / OBSERVE / DONE
+    python vector_store.py         Pinecone health check (no tokens spent)
+    On Render the API server runs with: uvicorn main:app --host 0.0.0.0 --port $PORT
+    Its URL is kept private (Maven only); open <render-url>/docs to try it. The free tier
+    sleeps after ~15 idle minutes, so the first request can take about a minute.
+
 How a question flows through the app ([LLM] = output can vary between runs,
 [fixed] = plain code, same input always gives the same output):
 
@@ -61,7 +74,7 @@ import time
 from html import escape
 from pathlib import Path
 
-from anthropic import Anthropic
+from anthropic import Anthropic, APIError
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Response
 from pinecone import PineconeError
@@ -145,9 +158,11 @@ class AskRequest(BaseModel):
     Only `question` is required; the rest are optional knobs for the demos.
     """
 
-    question: str
+    # The examples fill Swagger's "Try it out" box with working values instead of "string".
+    question: str = Field(examples=["Do unused vacation days carry over to next year?"])
     force_bad: bool = False  # Stage 3 demo knob — first attempt breaks schema on purpose.
-    model: str | None = None  # Stage 4 — optional override to swap models live.
+    # Stage 4 — optional override to swap models live; must be a key of MODEL_PRICES_PER_1K.
+    model: str | None = Field(default=None, examples=["claude-haiku-5-5"])
     top_k: int = Field(default=5, ge=1, le=20)  # Session 2 — how many stored chunks to retrieve.
 
 
@@ -211,7 +226,9 @@ class AgentRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    message: str = Field(min_length=1, max_length=2000)
+    message: str = Field(
+        min_length=1, max_length=2000, examples=["Can I bring my dog to the office?"]
+    )
 
 
 class AgentStep(BaseModel):
@@ -240,6 +257,7 @@ class AgentResponse(BaseModel):
     model: str  # The model the agent thinks with (search_handbook's /ask uses DEFAULT_MODEL).
     latency_ms: int
     step_limit_reached: bool  # True if the run was stopped at MAX_STEPS model calls.
+    problem: str | None = None  # Why the agent gave no real answer (None when it did). No secrets.
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +423,13 @@ def ask(body: AskRequest) -> AskResponse:
     """
 
     model = body.model or DEFAULT_MODEL
+    # An unknown model name (e.g. Swagger's "string") is the caller's mistake: say so (422)
+    # instead of letting Anthropic's "model not found" crash the request with a 500.
+    if model not in MODEL_PRICES_PER_1K:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown model {model!r}. Use one of: {', '.join(MODEL_PRICES_PER_1K)}.",
+        )
     last_error: str | None = None
 
     # Session 2: retrieve once, before the retry loop, so a retry reuses the same context.
@@ -454,6 +479,11 @@ def ask(body: AskRequest) -> AskResponse:
         except (ValidationError, ValueError) as exc:
             last_error = str(exc)
             continue
+        except APIError as exc:
+            # Claude itself failed (overloaded, rate limit, network). Report the type only.
+            raise HTTPException(
+                status_code=502, detail=f"The Claude request failed ({type(exc).__name__})."
+            ) from exc
 
     # Clean failure — never leak a half-parsed response to the client.
     raise HTTPException(
@@ -532,6 +562,8 @@ async def agent(body: AgentRequest) -> AgentResponse:
     answer = result["answer"]
     if result["step_limit_reached"] and not answer:
         answer = "Stopped: the step limit was reached before a final answer."
+    elif not answer:
+        answer = "Sorry, I couldn't produce an answer this time. Please try again."
 
     return AgentResponse(
         answer=answer,
@@ -539,4 +571,5 @@ async def agent(body: AgentRequest) -> AgentResponse:
         model=result["model"],
         latency_ms=int((time.perf_counter() - start) * 1000),
         step_limit_reached=result["step_limit_reached"],
+        problem=result["problem"],
     )

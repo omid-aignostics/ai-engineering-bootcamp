@@ -38,6 +38,7 @@ async def run_agent(message: str) -> dict:
         steps: one entry per tool call: think, tool, args, observation (shortened).
         model: the model the agent used.
         step_limit_reached: True if ADK stopped the run at MAX_STEPS model calls.
+        problem: why there is no answer (None when there is one). Short, no secrets.
     """
     service = InMemorySessionService()
     runner = Runner(agent=root_agent, app_name="helpdesk", session_service=service)
@@ -48,6 +49,8 @@ async def run_agent(message: str) -> dict:
     answer = ""
     thought: str | None = None
     step_limit_reached = False
+    problem: str | None = None  # why there is no answer, if ADK or Claude reported a problem
+    finish_reason = None  # why Claude stopped writing its last reply (e.g. STOP, MAX_TOKENS)
 
     try:
         async for event in runner.run_async(
@@ -56,6 +59,10 @@ async def run_agent(message: str) -> dict:
             new_message=content,
             run_config=RunConfig(max_llm_calls=MAX_STEPS),
         ):
+            if event.error_code:  # ADK reports model failures as events, not exceptions
+                problem = f"{event.error_code}: {(event.error_message or '')[:200]}"
+            if event.finish_reason:
+                finish_reason = event.finish_reason
             parts = event.content.parts if event.content and event.content.parts else []
             for part in parts:
                 if part.function_call:  # ACT
@@ -78,9 +85,17 @@ async def run_agent(message: str) -> dict:
     except LlmCallsLimitExceededError:
         step_limit_reached = True
 
+    answer = answer.strip()
+    if not answer and not step_limit_reached and problem is None:
+        problem = f"Claude ended without a text reply (finish reason: {finish_reason})."
+    if not answer:
+        # Printed to the server log (Render: Logs tab), so failures can be diagnosed later.
+        print(f"[run_agent] no answer: problem={problem!r} steps={[s['tool'] for s in steps]}", flush=True)
+
     return {
-        "answer": answer.strip(),
+        "answer": answer,
         "steps": steps,
         "model": MODEL,
         "step_limit_reached": step_limit_reached,
+        "problem": None if answer else problem,
     }
