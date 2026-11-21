@@ -109,10 +109,21 @@ curl -s -X POST https://your-service.onrender.com/agent \
   -d '{"message": "Can I bring my dog to the office?"}'
 ```
 
+Human-in-the-loop: before `create_hr_ticket` the agent pauses. `/agent` then returns `pending_confirmation` (with `session_id`, `confirmation_id` and a plain-words `question`) and no ticket exists yet. Approve or reject it:
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/agent/confirm \
+  -H "Content-Type: application/json" \
+  -d '{"session_id": "<from pending_confirmation>", "confirmation_id": "<from pending_confirmation>", "approved": true}'
+```
+
+`approved: false` skips the ticket and the agent tells the employee. Paused runs are kept in server memory, so they are lost if the server restarts (on Render: a redeploy or the free tier going to sleep).
+
 Without the server:
 
 ```bash
-python run_helpdesk.py                     # three test questions, printed as THINK / ACT / OBSERVE / DONE
+python run_helpdesk.py                     # three test questions, printed as THINK / ACT / OBSERVE / DONE; asks y/n before tickets
+python run_helpdesk.py --yes "Can I bring my dog to the office?"   # auto-approve (--no to reject)
 adk web --port 8080                        # ADK's browser UI; pick "helpdesk"
 ```
 

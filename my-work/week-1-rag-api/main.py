@@ -8,6 +8,7 @@ Endpoints:
     POST /ingest           Split a document into chunks and store them in Pinecone.
     GET  /health/pinecone  Check the Pinecone connection without spending tokens.
     POST /agent            Session 3: the help desk agent; returns its answer plus steps[].
+    POST /agent/confirm    Session 3 stretch: approve/reject a ticket the agent paused on.
 
 What runs what (from my-work/week-1-rag-api, after `source .venv/bin/activate`):
     uvicorn main:app --port 8000   API server (this file): /ask, /ingest, /agent, /docs
@@ -65,6 +66,8 @@ What this pipeline can't do, and why Session 3 adds an agent:
         -> [fixed] search_handbook()  -> ask() above, the whole RAG pipeline
         -> [LLM]   agent writes the final answer from what the tools returned
         -> [fixed] AgentResponse      answer + steps[] (think, tool, args, observation)
+    Human-in-the-loop: before create_hr_ticket the run pauses and AgentResponse carries
+    pending_confirmation; POST /agent/confirm with approved=true/false resumes it.
 
 Pinecone details live in vector_store.py; text splitting lives in chunking.py.
 """
@@ -81,7 +84,7 @@ from pinecone import PineconeError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from chunking import chunk_text
-from helpdesk.runner import run_agent
+from helpdesk.runner import UnknownConfirmation, resume_agent, run_agent
 from vector_store import namespace, pinecone_configured, pinecone_health, query_similar, upsert_texts
 
 # ---------------------------------------------------------------------------
@@ -246,8 +249,27 @@ class AgentStep(BaseModel):
     observation: str | None = None
 
 
+class PendingConfirmation(BaseModel):
+    """Session 3 stretch — the agent paused and needs a human's yes/no before a tool runs.
+
+        session_id       Which paused conversation this is.
+        confirmation_id  Which approval request; send both back to POST /agent/confirm.
+        tool / args      The tool the agent wants to run, and with what.
+        question         The same request in plain words, to show the human.
+    """
+
+    session_id: str
+    confirmation_id: str
+    tool: str
+    args: dict
+    question: str
+
+
 class AgentResponse(BaseModel):
     """Session 3 — the agent's final answer and the steps it took to get there.
+
+    If pending_confirmation is set, the run is paused: `answer` is the approval question,
+    and nothing happens until POST /agent/confirm says yes or no.
 
     Only these fields are returned: never API keys, environment values or raw errors.
     """
@@ -258,6 +280,17 @@ class AgentResponse(BaseModel):
     latency_ms: int
     step_limit_reached: bool  # True if the run was stopped at MAX_STEPS model calls.
     problem: str | None = None  # Why the agent gave no real answer (None when it did). No secrets.
+    pending_confirmation: PendingConfirmation | None = None  # Set when a human must approve.
+
+
+class AgentConfirmRequest(BaseModel):
+    """Session 3 stretch — the human's decision on a paused tool call."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    confirmation_id: str
+    approved: bool
 
 
 # ---------------------------------------------------------------------------
@@ -545,12 +578,14 @@ async def agent(body: AgentRequest) -> AgentResponse:
     """Session 3 — let the help desk agent handle a message (see helpdesk/agent.py).
 
     The agent may answer from the documents (its search_handbook tool calls ask() above),
-    open an HR ticket, or both in sequence. Each request is handled on its own, like /ask.
+    or want to open an HR ticket. Each message starts a new conversation, like /ask.
 
     Steps:
         1. run_agent() runs the agent loop, at most MAX_STEPS model calls.
         2. Return the final answer and one AgentStep per tool call.
-        3. Any unexpected failure: 502 with only the error type, never its details.
+        3. Before create_hr_ticket the run pauses: the response has pending_confirmation and
+           nothing happens until POST /agent/confirm (human-in-the-loop).
+        4. Any unexpected failure: 502 with only the error type, never its details.
     """
 
     start = time.perf_counter()
@@ -558,6 +593,33 @@ async def agent(body: AgentRequest) -> AgentResponse:
         result = await run_agent(body.message)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"The agent failed ({type(exc).__name__}).") from exc
+    return _agent_response(result, start)
+
+
+@app.post("/agent/confirm")
+async def agent_confirm(body: AgentConfirmRequest) -> AgentResponse:
+    """Session 3 stretch — approve or reject the tool call a paused /agent run is waiting on.
+
+    Send back session_id and confirmation_id from pending_confirmation, plus approved.
+    approved=true runs the tool (e.g. opens the ticket); approved=false skips it and the
+    agent tells the employee. 404 if nothing with those ids is waiting (already answered,
+    or the server restarted).
+    """
+
+    start = time.perf_counter()
+    try:
+        result = await resume_agent(body.session_id, body.confirmation_id, body.approved)
+    except UnknownConfirmation as exc:
+        raise HTTPException(
+            status_code=404, detail="Nothing is waiting for approval with these ids."
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"The agent failed ({type(exc).__name__}).") from exc
+    return _agent_response(result, start)
+
+
+def _agent_response(result: dict, start: float) -> AgentResponse:
+    """Pack a run_agent()/resume_agent() result into the AgentResponse shape."""
 
     answer = result["answer"]
     if result["step_limit_reached"] and not answer:
@@ -572,4 +634,5 @@ async def agent(body: AgentRequest) -> AgentResponse:
         latency_ms=int((time.perf_counter() - start) * 1000),
         step_limit_reached=result["step_limit_reached"],
         problem=result["problem"],
+        pending_confirmation=result["pending_confirmation"],
     )

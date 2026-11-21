@@ -28,6 +28,9 @@ Why search_handbook() calls ask() directly instead of sending an HTTP request to
 Tools:
     search_handbook   REAL: runs the week 1 RAG pipeline (Pinecone + grounded Claude answer).
     create_hr_ticket  PLACEHOLDER: returns a made-up ticket; a real one would call a ticket API.
+                      Human-in-the-loop: marked require_confirmation=True, so ADK pauses before
+                      it and a person must approve (POST /agent/confirm, or y/n in
+                      run_helpdesk.py, or the confirm button in adk web). Rejected = no ticket.
     Tools never raise: on failure they return {"error": ...}, so Claude sees the problem as an
     observation and tells the employee, instead of the whole run crashing.
 
@@ -67,6 +70,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import HTTPException
 from google.adk.agents import Agent
+from google.adk.tools import FunctionTool
 from google.adk.models.anthropic_llm import AnthropicLlm
 
 # Load ANTHROPIC_API_KEY and PINECONE_API_KEY from week-1-rag-api/.env (one folder up).
@@ -170,6 +174,9 @@ Steps:
    do NOT search the handbook: call create_hr_ticket with category "sensitive" right away.
 5. If search_handbook returns an "error", tell the employee the handbook search is not
    available right now and to try again later. Do not guess an answer.
+6. create_hr_ticket needs a human's approval first. If it returns "This tool call is
+   rejected", tell the employee no ticket was created and that they can contact HR directly.
+   Only mention a ticket_id that create_hr_ticket actually returned.
 
 Constraints:
 - Never invent policy. If the handbook didn't say it, you don't say it. Do not add facts or
@@ -184,5 +191,9 @@ Done means: you have sent ONE final reply that either
   (a) answers from the handbook and names the citations, or
   (b) gives the employee a ticket_id and expected response time, or
   (c) says the handbook search is unavailable.""",
-    tools=[search_handbook, create_hr_ticket],
+    tools=[
+        search_handbook,
+        # Human-in-the-loop: ADK pauses the run before this tool and waits for a yes/no.
+        FunctionTool(create_hr_ticket, require_confirmation=True),
+    ],
 )
