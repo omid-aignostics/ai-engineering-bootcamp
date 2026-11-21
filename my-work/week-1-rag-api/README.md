@@ -75,6 +75,7 @@ Store a document, then ask about it:
 ```bash
 curl -s -X POST http://127.0.0.1:8000/ingest \
   -H "Content-Type: application/json" \
+  -H "X-Admin-Key: <your INGEST_API_KEY from .env>" \
   -d '{"text": "The office dog is called Pixel and loves carrots.", "document_id": "handbook"}'
 
 curl -s -X POST http://127.0.0.1:8000/ask \
@@ -83,6 +84,8 @@ curl -s -X POST http://127.0.0.1:8000/ask \
 ```
 
 `/ask` retrieves the top 5 chunks (`top_k`) and tells Claude to answer **only** from them, citing each `document_id` it used in `answer.citations`, and to reply "I don't have enough information to answer that." when they don't cover the question. `sources` lists every retrieved chunk with its `id` and score. A citation that names a document that wasn't retrieved fails validation and triggers the retry. Without `PINECONE_API_KEY` it answers as before, with `sources` and `citations` empty. `GET /health/pinecone` checks the connection without spending tokens.
+
+`/ingest` is for admins only: send the `X-Admin-Key` header with the value of `INGEST_API_KEY` (in `.env`, and in Render's Environment settings). A missing or wrong key gets 401; if `INGEST_API_KEY` isn't set, `/ingest` is switched off (503). Whoever can store documents controls what `/ask` and the agent say, so this is the main defense against prompt injection and fake documents (see `injection_demo.py`).
 
 ## Session 3 — Help desk agent (Google ADK)
 
